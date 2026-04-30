@@ -1,18 +1,18 @@
-from fastapi import FastAPI, Depends
+import json
+from pathlib import Path
+
+from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from backend.database import get_db, Reading
-import joblib
-import numpy as np
+
+try:
+    import joblib
+except ImportError:
+    joblib = None
 
 app = FastAPI()
-
-# Load AI models at startup
-rf_model = joblib.load("ai_models/rf_model.pkl")
-iso_model = joblib.load("ai_models/iso_model.pkl")
-
-RISK_LABELS = {0: "Low", 1: "Medium", 2: "High"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,6 +21,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(message)
+            except WebSocketDisconnect:
+                self.disconnect(connection)
+
+
+manager = ConnectionManager()
+
+MODEL_DIR = Path(__file__).resolve().parent.parent / "ai_models"
+RF_MODEL_PATH = MODEL_DIR / "rf_model.pkl"
+ISO_MODEL_PATH = MODEL_DIR / "iso_model.pkl"
+
+rf_model = joblib.load(RF_MODEL_PATH) if joblib and RF_MODEL_PATH.exists() else None
+iso_model = joblib.load(ISO_MODEL_PATH) if joblib and ISO_MODEL_PATH.exists() else None
 
 
 class SensorDataRequest(BaseModel):
@@ -33,33 +63,80 @@ class SensorDataRequest(BaseModel):
     crack_width: float
 
 
-@app.post("/sensor-data")
-def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_db)):
-    # Prepare features for AI models
-    features = np.array([[data.temperature, data.humidity, data.air_pollution, 
-                          data.vibration, data.crack_width]])
-    
-    # Predict risk level using Random Forest
-    risk_level = int(rf_model.predict(features)[0])
-    
-    # Detect anomaly using Isolation Forest (-1=anomaly, 1=normal)
-    anomaly = int(iso_model.predict(features)[0])
-    
-    # Calculate Site Health Index (SHI)
-    environmental_score = max(0, 100 - (data.air_pollution / 6) - abs(data.temperature - 25))
-    structural_score = max(0, 100 - (data.crack_width * 15) - (data.vibration * 8))
-    ai_score = 100 - (risk_level * 33)
-    shi = round((environmental_score * 0.3) + (structural_score * 0.4) + (ai_score * 0.3), 2)
-    
-    # Determine alert level
-    if risk_level == 2 or anomaly == -1:
-        alert_level = "Critical"
-    elif risk_level == 1:
-        alert_level = "Warning"
+def calculate_shi(risk_level: int, anomaly: int) -> float:
+    base_score = max(0.0, 1.0 - (risk_level / 2.0))
+    if anomaly == -1:
+        base_score *= 0.85
+    return round(base_score, 4)
+
+
+def calculate_ai_metrics(data: SensorDataRequest):
+    features = [[
+        data.temperature,
+        data.humidity,
+        data.air_pollution,
+        data.vibration,
+        data.crack_width,
+    ]]
+
+    if rf_model is not None:
+        risk_level = int(rf_model.predict(features)[0])
     else:
-        alert_level = "Normal"
-    
-    # Save reading with AI results
+        if (
+            data.temperature > 40
+            or data.air_pollution > 300
+            or data.vibration > 3.5
+            or data.crack_width > 2.5
+        ):
+            risk_level = 2
+        elif (
+            data.temperature > 30
+            or data.air_pollution > 200
+            or data.vibration > 2.0
+            or data.crack_width > 1.5
+        ):
+            risk_level = 1
+        else:
+            risk_level = 0
+
+    if iso_model is not None:
+        anomaly = int(iso_model.predict(features)[0])
+    else:
+        anomaly = -1 if risk_level == 2 else 1
+
+    shi = calculate_shi(risk_level, anomaly)
+    return shi, risk_level, anomaly
+
+
+def serialize_reading(reading: Reading):
+    return {
+        "id": reading.id,
+        "monument": reading.monument,
+        "timestamp": reading.timestamp,
+        "temperature": reading.temperature,
+        "humidity": reading.humidity,
+        "air_pollution": reading.air_pollution,
+        "vibration": reading.vibration,
+        "crack_width": reading.crack_width,
+        "risk_level": reading.risk_level,
+        "anomaly": reading.anomaly,
+        "shi": reading.shi,
+    }
+
+
+@app.websocket("/ws/live-data")
+async def websocket_live_data(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+
+@app.post("/sensor-data")
+async def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_db)):
+    shi, risk_level, anomaly = calculate_ai_metrics(data)
     reading = Reading(
         monument=data.monument,
         timestamp=data.timestamp,
@@ -74,15 +151,12 @@ def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_db)):
     )
     db.add(reading)
     db.commit()
-    
-    return {
-        "status": "ok",
-        "message": "Data saved successfully",
-        "risk_level": RISK_LABELS[risk_level],
-        "anomaly": "Anomaly Detected" if anomaly == -1 else "Normal",
-        "shi": shi,
-        "alert_level": alert_level,
-    }
+    db.refresh(reading)
+
+    payload = json.dumps(serialize_reading(reading))
+    await manager.broadcast(payload)
+
+    return {"status": "ok", "message": "Data saved successfully"}
 
 
 @app.get("/latest")
