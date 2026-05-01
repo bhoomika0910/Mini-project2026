@@ -1,1 +1,7 @@
-fastapi uvicorn pydantic scikit-learn pandas numpy sqlalchemy 
+fastapi
+uvicorn
+pydantic
+scikit-learn
+pandas
+numpy
+sqlalchemy
