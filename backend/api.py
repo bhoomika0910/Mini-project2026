@@ -5,14 +5,23 @@ from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from backend.database import get_db, Reading
+from backend.database import get_db, Reading, engine, Base  # Yahan engine aur Base add kiya hai
 
 try:
     import joblib
 except ImportError:
     joblib = None
 
+# YE LINE RENDER PAR NAYI TABLE BANA DEGI
+Base.metadata.create_all(bind=engine)
+
 app = FastAPI()
+
+# Load AI models at startup
+rf_model = joblib.load("ai_models/rf_model.pkl")
+iso_model = joblib.load("ai_models/iso_model.pkl")
+
+RISK_LABELS = {0: "Low", 1: "Medium", 2: "High"}
 
 app.add_middleware(
     CORSMiddleware,
