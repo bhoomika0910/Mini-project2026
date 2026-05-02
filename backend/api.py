@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from backend.database import get_db, Reading, engine, Base  # Yahan engine aur Base add kiya hai
+from backend.database import engine, Base  # Agar pehle se upar import nahi hai, toh ise add karna
 
 try:
     import joblib
