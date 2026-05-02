@@ -5,22 +5,21 @@ from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from backend.database import get_db, Reading, engine, Base  # Yahan engine aur Base add kiya hai
-from backend.database import engine, Base  # Agar pehle se upar import nahi hai, toh ise add karna
+from backend.database import get_db, Reading, engine, Base
 
 try:
     import joblib
 except ImportError:
     joblib = None
 
-# YE LINE RENDER PAR NAYI TABLE BANA DEGI
+# Create tables in Render
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
 # Load AI models at startup
-rf_model = joblib.load("ai_models/rf_model.pkl")
-iso_model = joblib.load("ai_models/iso_model.pkl")
+rf_model = joblib.load("ai_models/rf_model.pkl") if joblib else None
+iso_model = joblib.load("ai_models/iso_model.pkl") if joblib else None
 
 RISK_LABELS = {0: "Low", 1: "Medium", 2: "High"}
 
@@ -73,19 +72,12 @@ class SensorDataRequest(BaseModel):
     crack_width: float
 
 
-def calculate_shi(risk_level: int, anomaly: int) -> float:
-    base_score = max(0.0, 1.0 - (risk_level / 2.0))
-    if anomaly == -1:
-        base_score *= 0.85
-    return round(base_score, 4)
-
-
 def calculate_shi(risk_level: int, anomaly: int, temp: float, aqi: float) -> float:
-    # Base health out of 100% (taaki UI par 0.5% ki jagah proper 80% ya 60% aaye)
+    # Base health out of 100%
     base_score = 100.0 - (risk_level * 20.0) 
     
-    # Real-time fluctuation (Temp aur AQI ki live reading se direct connect kar diya)
-    penalty = (temp * 0.2) + (aqi * 0.05)
+    # Real-time fluctuation based on live environment
+    penalty = (temp * 0.15) + (aqi * 0.02)
     
     final_shi = base_score - penalty
     if anomaly == -1:
@@ -106,20 +98,24 @@ def calculate_ai_metrics(data: SensorDataRequest):
     if rf_model is not None:
         risk_level = int(rf_model.predict(features)[0])
     else:
+        # REALISTIC THRESHOLDS FOR HERITAGE MONUMENTS
+        # High Risk: Fire, Earthquake, Severe Structural Failure, Extreme Pollution
         if (
-            data.temperature > 40
-            or data.air_pollution > 300
-            or data.vibration > 3.5
+            data.temperature > 50 
+            or data.air_pollution > 600 
+            or data.vibration > 5.0 
             or data.crack_width > 2.5
         ):
             risk_level = 2
+        # Medium Risk: Extreme Weather, High Traffic Vibrations, Smog Alert
         elif (
-            data.temperature > 30
-            or data.air_pollution > 200
-            or data.vibration > 2.0
-            or data.crack_width > 1.5
+            data.temperature > 45 
+            or data.air_pollution > 400 
+            or data.vibration > 1.5 
+            or data.crack_width > 1.0
         ):
             risk_level = 1
+        # Low Risk: Normal Environmental Conditions
         else:
             risk_level = 0
 
@@ -128,9 +124,9 @@ def calculate_ai_metrics(data: SensorDataRequest):
     else:
         anomaly = -1 if risk_level == 2 else 1
 
-    # AB SHI CALCULATION MEIN SENSORS KA LIVE DATA BHI JAYEGA
     shi = calculate_shi(risk_level, anomaly, data.temperature, data.air_pollution)
     return shi, risk_level, anomaly
+
 
 def serialize_reading(reading: Reading):
     return {
@@ -160,7 +156,6 @@ async def websocket_live_data(websocket: WebSocket):
 
 @app.post("/sensor-data")
 async def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_db)):
-    # BRAMHASTRA FIX: Force create table on every request just in case Render deletes it
     Base.metadata.create_all(bind=engine)
     
     shi, risk_level, anomaly = calculate_ai_metrics(data)
@@ -185,6 +180,7 @@ async def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_
 
     return {"status": "ok", "message": "Data saved successfully"}
 
+
 @app.get("/latest")
 def get_latest_readings(db: Session = Depends(get_db)):
     from sqlalchemy import func
@@ -201,22 +197,7 @@ def get_latest_readings(db: Session = Depends(get_db)):
         .all()
     )
     
-    return [
-        {
-            "id": r.id,
-            "monument": r.monument,
-            "timestamp": r.timestamp,
-            "temperature": r.temperature,
-            "humidity": r.humidity,
-            "air_pollution": r.air_pollution,
-            "vibration": r.vibration,
-            "crack_width": r.crack_width,
-            "risk_level": r.risk_level,
-            "anomaly": r.anomaly,
-            "shi": r.shi,
-        }
-        for r in readings
-    ]
+    return [serialize_reading(r) for r in readings]
 
 
 @app.get("/readings/{monument}")
@@ -229,19 +210,4 @@ def get_monument_readings(monument: str, db: Session = Depends(get_db)):
         .all()
     )
     
-    return [
-        {
-            "id": r.id,
-            "monument": r.monument,
-            "timestamp": r.timestamp,
-            "temperature": r.temperature,
-            "humidity": r.humidity,
-            "air_pollution": r.air_pollution,
-            "vibration": r.vibration,
-            "crack_width": r.crack_width,
-            "risk_level": r.risk_level,
-            "anomaly": r.anomaly,
-            "shi": r.shi,
-        }
-        for r in readings
-    ]
+    return [serialize_reading(r) for r in readings]
