@@ -16,8 +16,7 @@ function DashboardPage() {
   useEffect(() => {
     const fetchLatestData = async () => {
       try {
-        const response = await axios.get('https://mini-project2026-1.onrender.com/latest');
-        
+        const response = await axios.get('https://mini-project2026-2.onrender.com/latest');
         // Array ko object me convert karna
         const dataByMonument = response.data.reduce((acc, item) => {
           acc[item.monument] = item;
