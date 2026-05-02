@@ -80,6 +80,20 @@ def calculate_shi(risk_level: int, anomaly: int) -> float:
     return round(base_score, 4)
 
 
+def calculate_shi(risk_level: int, anomaly: int, temp: float, aqi: float) -> float:
+    # Base health out of 100% (taaki UI par 0.5% ki jagah proper 80% ya 60% aaye)
+    base_score = 100.0 - (risk_level * 20.0) 
+    
+    # Real-time fluctuation (Temp aur AQI ki live reading se direct connect kar diya)
+    penalty = (temp * 0.2) + (aqi * 0.05)
+    
+    final_shi = base_score - penalty
+    if anomaly == -1:
+        final_shi -= 15.0
+        
+    return round(max(0.0, final_shi), 2)
+
+
 def calculate_ai_metrics(data: SensorDataRequest):
     features = [[
         data.temperature,
@@ -114,9 +128,9 @@ def calculate_ai_metrics(data: SensorDataRequest):
     else:
         anomaly = -1 if risk_level == 2 else 1
 
-    shi = calculate_shi(risk_level, anomaly)
+    # AB SHI CALCULATION MEIN SENSORS KA LIVE DATA BHI JAYEGA
+    shi = calculate_shi(risk_level, anomaly, data.temperature, data.air_pollution)
     return shi, risk_level, anomaly
-
 
 def serialize_reading(reading: Reading):
     return {
