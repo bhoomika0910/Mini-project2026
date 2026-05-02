@@ -146,6 +146,9 @@ async def websocket_live_data(websocket: WebSocket):
 
 @app.post("/sensor-data")
 async def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_db)):
+    # BRAMHASTRA FIX: Force create table on every request just in case Render deletes it
+    Base.metadata.create_all(bind=engine)
+    
     shi, risk_level, anomaly = calculate_ai_metrics(data)
     reading = Reading(
         monument=data.monument,
@@ -167,7 +170,6 @@ async def create_sensor_data(data: SensorDataRequest, db: Session = Depends(get_
     await manager.broadcast(payload)
 
     return {"status": "ok", "message": "Data saved successfully"}
-
 
 @app.get("/latest")
 def get_latest_readings(db: Session = Depends(get_db)):
